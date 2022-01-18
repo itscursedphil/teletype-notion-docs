@@ -1,0 +1,29 @@
+{
+  "name": "teletype-notion-docs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@t3n/eslint-config": "^5.3.1",
+    "@t3n/eslint-config-typescript": "^5.3.1",
+    "@types/config": "^0.0.41",
+    "@types/jsdom": "^16.2.14",
+    "@types/node-fetch": "^2.5.12",
+    "ts-node": "^10.4.0",
+    "ts-node-dev": "^1.1.8",
+    "typescript": "^4.5.4"
+  },
+  "dependencies": {
+    "@notionhq/client": "^0.4.12",
+    "config": "^3.3.7",
+    "html-entities": "^2.3.2",
+    "jsdom": "^19.0.0",
+    "node-fetch": "^2.6.7"
+  }
+}
