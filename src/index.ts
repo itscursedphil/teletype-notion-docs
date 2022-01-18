@@ -8,9 +8,15 @@ import notion, { fetchExample } from './lib/notion';
 import { parseHTML } from './parser';
 
 // TODO:
-// - Parse lists
 // - Parse tables in .OpList
 // - Clean up and refactor
+
+const flatten = <T>(list: (T | T[])[]): T[] =>
+  list.reduce<T[]>(
+    (flattened, item) =>
+      Array.isArray(item) ? [...flattened, ...item] : [...flattened, item],
+    []
+  );
 
 interface RichTextObjectRequest {
   text: RichTextItemRequest[];
@@ -108,7 +114,10 @@ const parseRichTextFromHTML = (html: string): RichTextObjectRequest => {
     // Apply all transformations and reduce to flat array in each iteration
     .reduce(
       (output, transform) => transformNestedRichTextInput(output, transform),
-      [html] as (RichTextObjectRequest | string)[]
+      [html.replace(/<br><br>/g, '\n\n').replace(/<br>/g, '')] as (
+        | RichTextObjectRequest
+        | string
+      )[]
     )
     // Transform all left strings without annotations
     .map((p) => {
@@ -131,7 +140,9 @@ const parseRichTextFromHTML = (html: string): RichTextObjectRequest => {
   return parsed;
 };
 
-const parseBlockFromElement = (element: Element): BlockObjectRequest | null => {
+const parseBlocksFromDOMElement = (
+  element: Element
+): BlockObjectRequest | BlockObjectRequest[] | null => {
   if (element.tagName.toLowerCase() === 'h2') {
     return {
       heading_1: {
@@ -159,6 +170,55 @@ const parseBlockFromElement = (element: Element): BlockObjectRequest | null => {
         language: 'plain text',
       },
     };
+  }
+
+  if (element.tagName.toLocaleLowerCase() === 'ul') {
+    const listItems = Array.from(element.children);
+
+    return listItems.map((item) => {
+      const { text } = parseRichTextFromHTML(item.innerHTML);
+      return {
+        bulleted_list_item: {
+          text,
+        },
+      };
+    });
+  }
+
+  if (element.className.toLowerCase() === 'oplist') {
+    const rows = Array.from(element.querySelectorAll('table tr'));
+    const ops = rows.map((row) => {
+      const cols = Array.from(row.querySelectorAll('td'));
+      return cols.map<BlockObjectRequest>((col, i) => {
+        if (i > 2) {
+          const { text } = parseRichTextFromHTML(col.innerHTML);
+
+          return {
+            paragraph: {
+              text,
+            },
+          };
+        }
+
+        return {
+          paragraph: {
+            text: [
+              {
+                text: {
+                  content: decode(col.textContent),
+                },
+                annotations: {
+                  code: true,
+                  bold: true,
+                },
+              },
+            ],
+          },
+        };
+      });
+    });
+
+    return flatten(ops);
   }
 
   return null;
@@ -198,9 +258,11 @@ const init = async () => {
   await getExample();
   const docs = await getDocs();
   const dom = parseHTML(docs);
+
   const content = Array.from(
     dom.window.document.querySelector('.Content-inner').children
   );
+
   const sections = content.reduce((reducedSections, element) => {
     if (!reducedSections.length && element.tagName.toLowerCase() !== 'h1')
       return [];
@@ -212,21 +274,59 @@ const init = async () => {
       i < reducedSections.length - 1 ? s : [...s, element]
     );
   }, [] as any as [Element[]]);
+
   const opsSection = sections.find(
     (section) => section[0].id === 'ops-and-mods'
   );
 
-  const blocks = opsSection
-    .map((el) => parseBlockFromElement(el))
-    .filter((v) => !!v);
+  const blocks = flatten<BlockObjectRequest>(
+    opsSection.map((el) => parseBlocksFromDOMElement(el)).filter((v) => !!v)
+  );
 
   await writeFile(JSON.stringify(blocks, null, 2), 'output.json');
 
-  // notion.pages.create({
+  // Cut blocks array into sets of 999 because of request limit of 1000 children
+  const blockSets = blocks.reduce(
+    (sets, block) => {
+      const currentSet = sets[sets.length - 1];
+
+      if (!currentSet.length || currentSet.length % 999)
+        return [...sets.slice(0, -1), [...currentSet, block]];
+
+      return [...sets, [block]];
+    },
+    [[]] as BlockObjectRequest[][]
+  );
+
+  console.log(
+    blockSets.map((set) => set.length),
+    blocks.length
+  );
+
+  // const page = await notion.pages.create({
   //   parent: { page_id: config.notion.pageId },
   //   properties: { title: [{ text: { content: 'Ops' } }] },
-  //   children: blocks,
+  //   children: [{ table_of_contents: {} }],
   // });
+
+  // const addSetsToPage = async (sets: BlockObjectRequest[][]) => {
+  //   const currentSet = sets[0];
+
+  //   console.log(currentSet.length);
+
+  //   await notion.blocks.children.append({
+  //     block_id: page.id,
+  //     children: currentSet,
+  //   });
+
+  //   await new Promise((res) => setTimeout(res, 200));
+
+  //   if (sets.length > 1) {
+  //     await addSetsToPage(sets.slice(1));
+  //   }
+  // };
+
+  // await addSetsToPage(blockSets);
 };
 
 init();
