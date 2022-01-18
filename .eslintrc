@@ -1,3 +1,4 @@
 {
-  "extends": ["@t3n/eslint-config", "@t3n/eslint-config-typescript"]
+  "extends": ["@t3n/eslint-config", "@t3n/eslint-config-typescript"],
+  "ignorePatterns": ["*.d.ts"]
 }

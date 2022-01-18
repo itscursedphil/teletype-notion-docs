@@ -1,8 +1,8 @@
-import { AppendBlockChildrenParameters } from '@notionhq/client/build/src/api-endpoints';
 import { decode } from 'html-entities';
 
 import fetchDocs from './fetch';
 import { readFile, writeFile } from './fs';
+import { BlockObjectRequest, RichTextItemRequest } from './interfaces.d';
 import config from './lib/config';
 import notion, { fetchExample } from './lib/notion';
 import { parseHTML } from './parser';
@@ -12,137 +12,126 @@ import { parseHTML } from './parser';
 // - Parse tables in .OpList
 // - Clean up and refactor
 
-type Flatten<Type> = Type extends Array<infer Item> ? Item : Type;
+interface RichTextObjectRequest {
+  text: RichTextItemRequest[];
+}
 
-type BlockParameters = Flatten<AppendBlockChildrenParameters['children']>;
-
-const parseBlocksFromParagraph = (
-  paragraph: (BlockParameters | string)[],
-  parseElement: (
-    element: BlockParameters | string
-  ) => BlockParameters | string | (BlockParameters | string)[]
-) =>
-  paragraph
-    .map(parseElement)
-    .reduce<(BlockParameters | string)[]>((reduced, element) => {
-      if (Array.isArray(element)) return [...reduced, ...element];
-
-      return [...reduced, element];
-    }, []);
-
-const parseAnnotationBlocksFromParagraph =
+const parseAnnotationsFromHTML =
   (
     matchRegex: RegExp,
     markupRegex: RegExp,
     annotation: 'bold' | 'italic' | 'strikethrough' | 'underline' | 'code'
   ) =>
-  (paragraph: (BlockParameters | string)[]) =>
-    parseBlocksFromParagraph(paragraph, (p) => {
-      if (typeof p !== 'string') return p;
+  (html: string) => {
+    const matches = html.match(matchRegex);
 
-      const matches = p.match(matchRegex);
+    if (!matches?.length) return html;
 
-      if (!matches?.length) return p;
+    return html.split(matchRegex).reduce((all, fragment, i) => {
+      if (!matches[i]) return [...all, fragment];
 
-      return p.split(matchRegex).reduce((all, fragment, i) => {
-        if (!matches[i]) return [...all, fragment];
+      const text = matches[i].replace(markupRegex, '');
 
-        const text = matches[i].replace(markupRegex, '');
-
-        const block: BlockParameters = {
-          type: 'paragraph',
-          paragraph: {
-            text: [
-              {
-                text: { content: decode(text) },
-                annotations: { [annotation]: true },
-              },
-            ],
+      const block: RichTextObjectRequest = {
+        text: [
+          {
+            text: { content: decode(text) },
+            annotations: { [annotation]: true },
           },
-        };
+        ],
+      };
 
-        return [...all, fragment, block];
-      }, [] as (BlockParameters | string)[]);
-    });
+      return [...all, fragment, block];
+    }, [] as (RichTextObjectRequest | string)[]);
+  };
 
-const parseBoldBlocksFromParagraph = parseAnnotationBlocksFromParagraph(
+const parseBoldAnnotationsFromHTML = parseAnnotationsFromHTML(
   /<strong>.*?<\/strong>/g,
   /<\/?strong>/g,
-  'code'
+  'bold'
 );
 
-const parseItalicBlocksFromParagraph = parseAnnotationBlocksFromParagraph(
+const parseItalicAnnotationsFromHTML = parseAnnotationsFromHTML(
   /<em>.*?<\/em>/g,
   /<\/?em>/g,
-  'code'
+  'italic'
 );
 
-const parseCodeBlocksFromParagraph = parseAnnotationBlocksFromParagraph(
+const parseCodeAnnotationsFromHTML = parseAnnotationsFromHTML(
   /<code>.*?<\/code>/g,
   /<\/?code>/g,
   'code'
 );
 
-const parseLinkBlocksFromParagraph = (
-  paragraph: (BlockParameters | string)[]
-) =>
-  parseBlocksFromParagraph(paragraph, (p) => {
-    if (typeof p !== 'string') return p;
+const parseLinksFromHTML = (html: string) => {
+  const regex = /<a href.+?\/a>/g;
+  const matches = html.match(regex);
 
-    const regex = /<a href.+?\/a>/g;
+  if (!matches?.length) return html;
 
-    const matches = p.match(regex);
+  return html.split(regex).reduce((all, fragment, i) => {
+    if (!matches[i]) return [...all, fragment];
 
-    if (!matches?.length) return p;
+    const match = matches[i];
+    const text = match.replace(/(<a .*?>|<\/a>)/g, '');
+    const link = match.match(/<a href="(.+?)">/)[1];
 
-    return p.split(regex).reduce((all, fragment, i) => {
-      if (!matches[i]) return [...all, fragment];
-
-      const match = matches[i];
-      const text = match.replace(/(<a .*?>|<\/a>)/g, '');
-      const link = match.match(/<a href="(.+?)">/)[1];
-
-      const block: BlockParameters = {
-        type: 'paragraph',
-        paragraph: {
-          text: [{ text: { content: text, link: { url: link } } }],
-        },
-      };
-
-      return [...all, fragment, block];
-    }, [] as (BlockParameters | string)[]);
-  });
-
-const parseTextBlocksFromParagraph = (
-  paragraph: (BlockParameters | string)[]
-): BlockParameters[] =>
-  paragraph.map((p) => {
-    if (typeof p !== 'string') return p;
-
-    return {
-      type: 'paragraph',
-      paragraph: {
-        text: [{ text: { content: p } }],
-      },
+    const block: RichTextObjectRequest = {
+      text: [{ text: { content: text, link: { url: link } } }],
     };
-  });
 
-const parseParagraph = (paragraph: string): BlockParameters[] => {
-  const parsed = [
-    parseBoldBlocksFromParagraph,
-    parseItalicBlocksFromParagraph,
-    parseCodeBlocksFromParagraph,
-    parseLinkBlocksFromParagraph,
-    parseTextBlocksFromParagraph,
-  ].reduce((output, transform) => transform(output), [paragraph] as (
-    | BlockParameters
-    | string
-  )[]);
-
-  return parsed as any as BlockParameters[];
+    return [...all, fragment, block];
+  }, [] as (RichTextObjectRequest | string)[]);
 };
 
-const parseBlockFromElement = (element: Element): BlockParameters | null => {
+const transformNestedRichTextInput = (
+  input: (RichTextObjectRequest | string)[],
+  transform: (
+    element: RichTextObjectRequest | string
+  ) => RichTextObjectRequest | string | (RichTextObjectRequest | string)[]
+) =>
+  input
+    .map((i) => (typeof i === 'string' ? transform(i) : i))
+    .reduce<(RichTextObjectRequest | string)[]>((reduced, element) => {
+      if (Array.isArray(element)) return [...reduced, ...element];
+
+      return [...reduced, element];
+    }, []);
+
+const parseRichTextFromHTML = (html: string): RichTextObjectRequest => {
+  const parsed = [
+    parseBoldAnnotationsFromHTML,
+    parseItalicAnnotationsFromHTML,
+    parseCodeAnnotationsFromHTML,
+    parseLinksFromHTML,
+  ]
+    // Apply all transformations and reduce to flat array in each iteration
+    .reduce(
+      (output, transform) => transformNestedRichTextInput(output, transform),
+      [html] as (RichTextObjectRequest | string)[]
+    )
+    // Transform all left strings without annotations
+    .map((p) => {
+      if (typeof p !== 'string') return p;
+
+      return {
+        text: [{ text: { content: p } }],
+      };
+    })
+    // Reduce into rich text object
+    .reduce(
+      (output, el) => ({
+        text: [...output.text, ...el.text],
+      }),
+      {
+        text: [],
+      } as RichTextObjectRequest
+    );
+
+  return parsed;
+};
+
+const parseBlockFromElement = (element: Element): BlockObjectRequest | null => {
   if (element.tagName.toLowerCase() === 'h2') {
     return {
       heading_1: {
@@ -152,30 +141,13 @@ const parseBlockFromElement = (element: Element): BlockParameters | null => {
   }
 
   if (element.tagName.toLowerCase() === 'p') {
-    return parseParagraph(element.innerHTML).reduce<BlockParameters>(
-      (output, el) => {
-        if (
-          typeof el === 'string' ||
-          el.type !== 'paragraph' ||
-          output.type !== 'paragraph'
-        )
-          return output;
+    const { text } = parseRichTextFromHTML(element.innerHTML);
 
-        return {
-          type: 'paragraph',
-          paragraph: {
-            ...output.paragraph,
-            text: [...output.paragraph.text, ...el.paragraph.text],
-          },
-        };
+    return {
+      paragraph: {
+        text,
       },
-      {
-        type: 'paragraph',
-        paragraph: {
-          text: [],
-        },
-      }
-    );
+    };
   }
 
   if (element.tagName.toLowerCase() === 'pre') {
