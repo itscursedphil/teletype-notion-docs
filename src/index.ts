@@ -1,4 +1,5 @@
 import { decode } from 'html-entities';
+import { JSDOM } from 'jsdom';
 
 import fetchDocs from './fetch';
 import { readFile, writeFile } from './fs';
@@ -8,21 +9,13 @@ import notion, { fetchExample } from './lib/notion';
 import { parseHTML } from './parser';
 
 // TODO:
-// - Parse tables in .OpList
 // - Clean up and refactor
-
-const flatten = <T>(list: (T | T[])[]): T[] =>
-  list.reduce<T[]>(
-    (flattened, item) =>
-      Array.isArray(item) ? [...flattened, ...item] : [...flattened, item],
-    []
-  );
 
 interface RichTextObjectRequest {
   text: RichTextItemRequest[];
 }
 
-const parseAnnotationsFromHTML =
+const parseRichTextAnnotationsFromHTML =
   (
     matchRegex: RegExp,
     markupRegex: RegExp,
@@ -51,19 +44,19 @@ const parseAnnotationsFromHTML =
     }, [] as (RichTextObjectRequest | string)[]);
   };
 
-const parseBoldAnnotationsFromHTML = parseAnnotationsFromHTML(
+const parseBoldRichTextAnnotationsFromHTML = parseRichTextAnnotationsFromHTML(
   /<strong>.*?<\/strong>/g,
   /<\/?strong>/g,
   'bold'
 );
 
-const parseItalicAnnotationsFromHTML = parseAnnotationsFromHTML(
+const parseItalicRichTextAnnotationsFromHTML = parseRichTextAnnotationsFromHTML(
   /<em>.*?<\/em>/g,
   /<\/?em>/g,
   'italic'
 );
 
-const parseCodeAnnotationsFromHTML = parseAnnotationsFromHTML(
+const parseCodeRichTextAnnotationsFromHTML = parseRichTextAnnotationsFromHTML(
   /<code>.*?<\/code>/g,
   /<\/?code>/g,
   'code'
@@ -106,18 +99,15 @@ const transformNestedRichTextInput = (
 
 const parseRichTextFromHTML = (html: string): RichTextObjectRequest => {
   const parsed = [
-    parseBoldAnnotationsFromHTML,
-    parseItalicAnnotationsFromHTML,
-    parseCodeAnnotationsFromHTML,
+    parseBoldRichTextAnnotationsFromHTML,
+    parseItalicRichTextAnnotationsFromHTML,
+    parseCodeRichTextAnnotationsFromHTML,
     parseLinksFromHTML,
   ]
     // Apply all transformations and reduce to flat array in each iteration
     .reduce(
       (output, transform) => transformNestedRichTextInput(output, transform),
-      [html.replace(/<br><br>/g, '\n\n').replace(/<br>/g, '')] as (
-        | RichTextObjectRequest
-        | string
-      )[]
+      [html] as (RichTextObjectRequest | string)[]
     )
     // Transform all left strings without annotations
     .map((p) => {
@@ -138,6 +128,88 @@ const parseRichTextFromHTML = (html: string): RichTextObjectRequest => {
     );
 
   return parsed;
+};
+
+const parseOpList = (element: Element) => {
+  const rows = Array.from(element.querySelectorAll('table tr'));
+  const ops = rows
+    .map((row) => {
+      const cols = Array.from(row.querySelectorAll('td'));
+      return cols
+        .map<BlockObjectRequest | BlockObjectRequest[]>((col, i) => {
+          // First three cols in oplist are ops
+          if (i < 3) {
+            return {
+              paragraph: {
+                text: [
+                  {
+                    text: {
+                      content: decode(col.textContent),
+                    },
+                    annotations: {
+                      code: true,
+                      bold: true,
+                    },
+                  },
+                ],
+              },
+            };
+          }
+
+          // Last col in oplist is description
+          const htmlInput = col.innerHTML
+            // Parse numbered lists
+            .replace(/<br>\s*(\d+)\.\s*/g, '\n$1. ')
+            // Parse unnumbered lists with dash decorator
+            .replace(/<br>\s*-\s*/g, '\n- ')
+            // Parse unnumbered lists with star decorator
+            .replace(/<br>\s*\*\s*/g, '\n- ')
+            // Parse paragraph line breaks
+            .replace(/<br><br>/g, '\n\n')
+            // Remove unneccessary line breaks
+            .replace(/<br>/g, ' ');
+
+          const codeParts = Array.from(col.getElementsByTagName('code'))
+            .map((el) => el.textContent)
+            .filter((code) => code.includes('<br/>'))
+            .map((code) => {
+              return code
+                .replace(/^<br\/>/, '')
+                .replace(/<br\/>$/, '')
+                .replace(/<br\/>/g, '\n')
+                .replace(/\s{2,}/g, ' ')
+                .replace(/^text /, '');
+            });
+
+          const htmlParts = htmlInput.split(/<code>(?:text)?&lt;.*?<\/code>/);
+
+          return htmlParts.reduce((blocks, htmlPart, idx) => {
+            const { text } = parseRichTextFromHTML(htmlPart);
+            const codePart = codeParts[idx];
+
+            const paragraphBlock = {
+              paragraph: {
+                text,
+              },
+            };
+
+            if (!codePart) return [...blocks, paragraphBlock];
+
+            const codeBlock: BlockObjectRequest = {
+              code: {
+                text: [{ text: { content: codePart } }],
+                language: 'json',
+              },
+            };
+
+            return [...blocks, paragraphBlock, codeBlock];
+          }, [] as BlockObjectRequest[]);
+        })
+        .concat({ divider: {} });
+    })
+    .flat(2);
+
+  return ops;
 };
 
 const parseBlocksFromDOMElement = (
@@ -167,7 +239,7 @@ const parseBlocksFromDOMElement = (
     return {
       code: {
         text: [{ text: { content: code } }],
-        language: 'plain text',
+        language: 'json',
       },
     };
   }
@@ -186,39 +258,7 @@ const parseBlocksFromDOMElement = (
   }
 
   if (element.className.toLowerCase() === 'oplist') {
-    const rows = Array.from(element.querySelectorAll('table tr'));
-    const ops = rows.map((row) => {
-      const cols = Array.from(row.querySelectorAll('td'));
-      return cols.map<BlockObjectRequest>((col, i) => {
-        if (i > 2) {
-          const { text } = parseRichTextFromHTML(col.innerHTML);
-
-          return {
-            paragraph: {
-              text,
-            },
-          };
-        }
-
-        return {
-          paragraph: {
-            text: [
-              {
-                text: {
-                  content: decode(col.textContent),
-                },
-                annotations: {
-                  code: true,
-                  bold: true,
-                },
-              },
-            ],
-          },
-        };
-      });
-    });
-
-    return flatten(ops);
+    return parseOpList(element);
   }
 
   return null;
@@ -254,6 +294,19 @@ const getExample = async () => {
   }
 };
 
+const chunkList = <T>(list: T[], chunkLimit: number) =>
+  list.reduce(
+    (sets, block) => {
+      const currentSet = sets[sets.length - 1];
+
+      if (!currentSet.length || currentSet.length % chunkLimit)
+        return [...sets.slice(0, -1), [...currentSet, block]];
+
+      return [...sets, [block]];
+    },
+    [[]] as T[][]
+  );
+
 const init = async () => {
   await getExample();
   const docs = await getDocs();
@@ -279,27 +332,18 @@ const init = async () => {
     (section) => section[0].id === 'ops-and-mods'
   );
 
-  const blocks = flatten<BlockObjectRequest>(
-    opsSection.map((el) => parseBlocksFromDOMElement(el)).filter((v) => !!v)
-  );
+  const blocks = opsSection
+    .map((el) => parseBlocksFromDOMElement(el))
+    .filter((v) => !!v)
+    .flat();
 
   await writeFile(JSON.stringify(blocks, null, 2), 'output.json');
 
   // Cut blocks array into sets of 999 because of request limit of 1000 children
-  const blockSets = blocks.reduce(
-    (sets, block) => {
-      const currentSet = sets[sets.length - 1];
-
-      if (!currentSet.length || currentSet.length % 999)
-        return [...sets.slice(0, -1), [...currentSet, block]];
-
-      return [...sets, [block]];
-    },
-    [[]] as BlockObjectRequest[][]
-  );
+  const blockChunks = chunkList<BlockObjectRequest>(blocks, 999);
 
   console.log(
-    blockSets.map((set) => set.length),
+    blockChunks.map((chunk) => chunk.length),
     blocks.length
   );
 
@@ -309,8 +353,8 @@ const init = async () => {
   //   children: [{ table_of_contents: {} }],
   // });
 
-  // const addSetsToPage = async (sets: BlockObjectRequest[][]) => {
-  //   const currentSet = sets[0];
+  // const addBlockChunksToPage = async (chunks: BlockObjectRequest[][]) => {
+  //   const currentSet = chunks[0];
 
   //   console.log(currentSet.length);
 
@@ -321,12 +365,12 @@ const init = async () => {
 
   //   await new Promise((res) => setTimeout(res, 200));
 
-  //   if (sets.length > 1) {
-  //     await addSetsToPage(sets.slice(1));
+  //   if (chunks.length > 1) {
+  //     await addBlockChunksToPage(chunks.slice(1));
   //   }
   // };
 
-  // await addSetsToPage(blockSets);
+  // await addBlockChunksToPage(blockChunks);
 };
 
 init();
