@@ -7,6 +7,7 @@ export interface NotionConfig {
 
 export interface Config {
   notion: NotionConfig;
+  dry: boolean;
 }
 
 export default config.util.toObject() as Config;

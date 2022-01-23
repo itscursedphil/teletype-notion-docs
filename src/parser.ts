@@ -257,5 +257,12 @@ export const parseBlocksFromDOMElement = (
     return parseOpList(element);
   }
 
+  console.log(
+    'Element could not be parsed',
+    element.tagName,
+    element.id,
+    element.className
+  );
+
   return null;
 };

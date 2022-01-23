@@ -1,8 +1,15 @@
+/* eslint-disable camelcase */
 import fetchDocs from './fetch';
 import { readFile, writeFile } from './fs';
-import { BlockObjectRequest } from './interfaces.d';
+import { BlockObjectRequest, ListBlockChildrenResponse } from './interfaces.d';
 import config from './lib/config';
-import notion, { fetchExample } from './lib/notion';
+import notion, {
+  ChildPageResponse,
+  fetchExample,
+  getChildPagesFromBlockChildrenResults,
+  getOrCreateChildPage,
+  getPageBlocks,
+} from './lib/notion';
 import { parseBlocksFromDOMElement, parseHTML } from './parser';
 
 // TODO:
@@ -54,6 +61,83 @@ const chunkList = <T>(list: T[], chunkLimit: number) =>
     [[]] as T[][]
   );
 
+const addBlockChunksToPage = async (
+  pageId: string,
+  chunks: BlockObjectRequest[][]
+) => {
+  const currentChunk = chunks[0];
+
+  console.log(`\nAdding chunk of length ${currentChunk.length}`);
+
+  if (!config.dry) {
+    await notion.blocks.children.append({
+      block_id: pageId,
+      children: currentChunk,
+    });
+
+    await new Promise((res) => setTimeout(res, 200));
+  }
+
+  console.log(`Finished adding chunk of length ${currentChunk.length}\n`);
+
+  if (chunks.length > 1) {
+    await addBlockChunksToPage(pageId, chunks.slice(1));
+  }
+};
+
+const updateSectionPagesSequentially = async (
+  parentPageId: string,
+  parentPageChildPages: ChildPageResponse[],
+  sections: Element[][]
+) => {
+  const currentSection = sections[0];
+  const currentSectionTitle = currentSection[0].textContent;
+
+  console.log('-----');
+  console.log(`\n${currentSectionTitle}`);
+
+  const currentSectionBlocks = currentSection
+    .map((el) => parseBlocksFromDOMElement(el))
+    .filter((v) => !!v)
+    .flat();
+
+  // Cut blocks array into sets of 999 because of request limit of 1000 children
+  const currentSectionBlockChunks = chunkList<BlockObjectRequest>(
+    currentSectionBlocks,
+    999
+  );
+
+  console.log(
+    currentSectionBlockChunks.map((chunk) => chunk.length),
+    currentSectionBlocks.length
+  );
+
+  const currentSectionPage = await getOrCreateChildPage(
+    parentPageId,
+    parentPageChildPages,
+    currentSectionTitle
+  );
+
+  if (!config.dry) {
+    await notion.blocks.children.append({
+      block_id: currentSectionPage.id,
+      children: [{ table_of_contents: {} }],
+    });
+  }
+
+  await addBlockChunksToPage(currentSectionPage.id, currentSectionBlockChunks);
+
+  console.log('-----');
+
+  if (sections.length > 1) {
+    await updateSectionPagesSequentially(
+      parentPageId,
+      parentPageChildPages,
+      sections.slice(1)
+    );
+  }
+};
+
 const init = async () => {
   // await getExample();
   const docs = await getDocs();
@@ -75,49 +159,29 @@ const init = async () => {
     );
   }, [] as any as [Element[]]);
 
-  const opsSection = sections.find(
-    (section) => section[0].id === 'ops-and-mods'
+  const titleSection = sections.filter((s, i) => i === 0).map((s) => s[0]);
+  const versionString = titleSection[0].textContent.replace('Teletype ', '');
+
+  const pageBlocks = await getPageBlocks(config.notion.pageId);
+  const childPages = getChildPagesFromBlockChildrenResults(pageBlocks.results);
+
+  const currentVersionPage = await getOrCreateChildPage(
+    config.notion.pageId,
+    childPages,
+    versionString
+  );
+  const currentVersionPageBlocks = await getPageBlocks(currentVersionPage.id);
+  const currentVersionChildPages = getChildPagesFromBlockChildrenResults(
+    currentVersionPageBlocks.results
   );
 
-  const blocks = opsSection
-    .map((el) => parseBlocksFromDOMElement(el))
-    .filter((v) => !!v)
-    .flat();
+  const contentSections = sections.filter((s, i) => i > 0);
 
-  await writeFile(JSON.stringify(blocks, null, 2), 'output.json');
-
-  // Cut blocks array into sets of 999 because of request limit of 1000 children
-  const blockChunks = chunkList<BlockObjectRequest>(blocks, 999);
-
-  console.log(
-    blockChunks.map((chunk) => chunk.length),
-    blocks.length
+  await updateSectionPagesSequentially(
+    currentVersionPage.id,
+    currentVersionChildPages,
+    contentSections
   );
-
-  // const page = await notion.pages.create({
-  //   parent: { page_id: config.notion.pageId },
-  //   properties: { title: [{ text: { content: opsSection[0].textContent } }] },
-  //   children: [{ table_of_contents: {} }],
-  // });
-
-  // const addBlockChunksToPage = async (chunks: BlockObjectRequest[][]) => {
-  //   const currentSet = chunks[0];
-
-  //   console.log(currentSet.length);
-
-  //   await notion.blocks.children.append({
-  //     block_id: page.id,
-  //     children: currentSet,
-  //   });
-
-  //   await new Promise((res) => setTimeout(res, 200));
-
-  //   if (chunks.length > 1) {
-  //     await addBlockChunksToPage(chunks.slice(1));
-  //   }
-  // };
-
-  // await addBlockChunksToPage(blockChunks);
 };
 
 init();

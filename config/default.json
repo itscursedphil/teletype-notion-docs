@@ -2,5 +2,6 @@
   "notion": {
     "secret": "",
     "pageId": ""
-  }
+  },
+  "dry": false
 }
